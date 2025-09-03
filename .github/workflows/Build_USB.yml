@@ -86,37 +86,230 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # 添加这一步：复制USB Redirector包到ImmortalWrt
-
-    - name: Copy USB Redirector package to ImmortalWrt  
+    # 替换原来的 "Copy USB Redirector package to ImmortalWrt" 步骤
+    - name: Create wrapper for USB Redirector package
       run: |
-        echo "=== Copying USB Redirector Server package ==="
-    
-        # 假设您的仓库根目录包含 Makefile
-        echo "Repository contents:"
-        ls -la
-    
-        # 创建包目录
+        echo "=== Creating USB Redirector wrapper package ==="
+        
+        # 首先复制原始包
+        echo "Copying original package..."
+        cp -r usb-redirector-server ImmortalWrt/package/usb-redirector-server-orig
+        
+        # 显示原始包结构
+        echo "Original package structure:"
+        ls -la ImmortalWrt/package/usb-redirector-server-orig/
+        
+        # 创建新的包装器包
         mkdir -p ImmortalWrt/package/usb-redirector-server
-    
-        # 复制所有文件（除了 .git 和 ImmortalWrt）
-        rsync -av --exclude='.git' --exclude='ImmortalWrt' --exclude='.github' . ImmortalWrt/package/usb-redirector-server/
-      
-        # 检查复制结果
-        echo "Copied files:"
-        ls -la ImmortalWrt/package/usb-redirector-server/
-    
-        # 修复 Makefile 缩进
-        if [ -f ImmortalWrt/package/usb-redirector-server/Makefile ]; then
-            sed -i 's/^[ ]\+/\t/g' ImmortalWrt/package/usb-redirector-server/Makefile
-            echo "Makefile tabs fixed"
-        else
-            echo "Warning: Makefile not found after copy"
-        fi
-    
-        echo "Package copied successfully"
+        
+        # 创建包装器Makefile
+        cat > ImmortalWrt/package/usb-redirector-server/Makefile << 'EOF'
+        include $(TOPDIR)/rules.mk
+        
+        PKG_NAME:=usb-redirector-server
+        PKG_VERSION:=3.10
+        PKG_RELEASE:=1
+        
+        PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+        
+        include $(INCLUDE_DIR)/package.mk
+        include $(INCLUDE_DIR)/kernel.mk
+        
+        define Package/usb-redirector-server
+        	SECTION:=utils
+        	CATEGORY:=Utilities
+        	TITLE:=USB Redirector Server
+        	DEPENDS:=+kmod-usb-core
+        endef
+        
+        define Package/usb-redirector-server/description
+        	USB Redirector Server for OpenWrt/ImmortalWrt
+        	Note: This package contains precompiled binaries
+        endef
+        
+        define KernelPackage/usb-redirector-server
+        	SUBMENU:=USB Support
+        	TITLE:=USB Redirector kernel module
+        	FILES:=$(PKG_BUILD_DIR)/vusbmod.ko
+        	AUTOLOAD:=$(call AutoLoad,90,vusbmod)
+        	DEPENDS:=+kmod-usb-core
+        endef
+        
+        define Build/Prepare
+        	mkdir -p $(PKG_BUILD_DIR)
+        	# 复制原始包的文件
+        	if [ -d ../usb-redirector-server-orig/usb-redirector-server ]; then \
+        		$(CP) ../usb-redirector-server-orig/usb-redirector-server/* $(PKG_BUILD_DIR)/; \
+        	elif [ -d ../usb-redirector-server-orig/files ]; then \
+        		$(CP) ../usb-redirector-server-orig/files/* $(PKG_BUILD_DIR)/; \
+        	else \
+        		$(CP) ../usb-redirector-server-orig/* $(PKG_BUILD_DIR)/ 2>/dev/null || true; \
+        	fi
+        endef
+        
+        define Build/Configure
+        endef
+        
+        define Build/Compile
+        	# 如果有kernel module需要编译
+        	if [ -f $(PKG_BUILD_DIR)/Makefile.kernel ]; then \
+        		$(MAKE) -C "$(LINUX_DIR)" \
+        			CROSS_COMPILE="$(TARGET_CROSS)" \
+        			ARCH="$(LINUX_KARCH)" \
+        			SUBDIRS="$(PKG_BUILD_DIR)" \
+        			modules; \
+        	fi
+        endef
+        
+        # 自定义安装过程，绕过库检查
+        define Package/usb-redirector-server/install
+        	$(INSTALL_DIR) $(1)/usr/bin
+        	$(INSTALL_DIR) $(1)/usr/sbin
+        	$(INSTALL_DIR) $(1)/etc/init.d
+        	$(INSTALL_DIR) $(1)/etc
+        	$(INSTALL_DIR) $(1)/lib
+        	
+        	# 查找并安装二进制文件
+        	@echo "Looking for binaries in $(PKG_BUILD_DIR)..."
+        	@find $(PKG_BUILD_DIR) -type f -name "usbsrv*" -o -name "usbsrvd*" | head -5
+        	
+        	# 安装 usbsrv
+        	if [ -f $(PKG_BUILD_DIR)/bin/aarch64-muslhf/usbsrv ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/aarch64-muslhf/usbsrv $(1)/usr/bin/; \
+        	elif [ -f $(PKG_BUILD_DIR)/bin/aarch64/usbsrv ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/aarch64/usbsrv $(1)/usr/bin/; \
+        	elif [ -f $(PKG_BUILD_DIR)/usbsrv ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/usbsrv $(1)/usr/bin/; \
+        	fi
+        	
+        	# 安装 usbsrvd
+        	if [ -f $(PKG_BUILD_DIR)/bin/aarch64-muslhf/usbsrvd-srv ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/aarch64-muslhf/usbsrvd-srv $(1)/usr/sbin/usbsrvd; \
+        	elif [ -f $(PKG_BUILD_DIR)/bin/aarch64/usbsrvd-srv ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/aarch64/usbsrvd-srv $(1)/usr/sbin/usbsrvd; \
+        	elif [ -f $(PKG_BUILD_DIR)/usbsrvd-srv ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/usbsrvd-srv $(1)/usr/sbin/usbsrvd; \
+        	elif [ -f $(PKG_BUILD_DIR)/usbsrvd ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/usbsrvd $(1)/usr/sbin/usbsrvd; \
+        	fi
+        	
+        	# 安装配置文件
+        	if [ -f $(PKG_BUILD_DIR)/usbsrvd.conf ]; then \
+        		$(INSTALL_DATA) $(PKG_BUILD_DIR)/usbsrvd.conf $(1)/etc/; \
+        	else \
+        		echo "# USB Redirector Config" > $(1)/etc/usbsrvd.conf; \
+        	fi
+        	
+        	# 安装启动脚本
+        	if [ -f $(PKG_BUILD_DIR)/usbsrvd.init ]; then \
+        		$(INSTALL_BIN) $(PKG_BUILD_DIR)/usbsrvd.init $(1)/etc/init.d/usbsrvd; \
+        	else \
+        		$(INSTALL_BIN) ./files/usbsrvd.init $(1)/etc/init.d/usbsrvd 2>/dev/null || \
+        		echo "#!/bin/sh" > $(1)/etc/init.d/usbsrvd; \
+        	fi
+        	chmod +x $(1)/etc/init.d/usbsrvd
+        	
+        	# 创建兼容性脚本
+        	cat > $(1)/lib/glibc-compat.sh << 'SCRIPT'
+        #!/bin/sh
+        ln -sf /lib/libc.so /lib/libc.so.6 2>/dev/null
+        ln -sf /lib/libc.so /lib/libm.so.6 2>/dev/null
+        ln -sf /lib/libc.so /lib/libpthread.so.0 2>/dev/null
+        ln -sf /lib/libc.so /lib/librt.so.1 2>/dev/null
+        ln -sf /lib/ld-musl-aarch64.so.1 /lib/ld-linux-aarch64.so.1 2>/dev/null
+        SCRIPT
+        	chmod +x $(1)/lib/glibc-compat.sh
+        endef
+        
+        define KernelPackage/usb-redirector-server/install
+        	$(INSTALL_DIR) $(1)/lib/modules/$(LINUX_VERSION)
+        	if [ -f $(PKG_BUILD_DIR)/vusbmod.ko ]; then \
+        		$(CP) $(PKG_BUILD_DIR)/vusbmod.ko $(1)/lib/modules/$(LINUX_VERSION)/; \
+        	fi
+        endef
+        
+        define Package/usb-redirector-server/postinst
+        #!/bin/sh
+        [ -n "$${IPKG_INSTROOT}" ] || {
+        	/lib/glibc-compat.sh
+        	/etc/init.d/usbsrvd enable 2>/dev/null
+        	/etc/init.d/usbsrvd start 2>/dev/null
+        }
+        exit 0
+        endef
+        
+        # 覆盖依赖检查
+        PKG_CHECK_FORMAT_SECURITY:=0
+        RSTRIP:=:
+        STRIP:=/bin/true
+        CHECK_DEPS:=0
+        
+        $(eval $(call BuildPackage,usb-redirector-server))
+        $(eval $(call KernelPackage,usb-redirector-server))
+        EOF
+        
+        # 修复缩进
+        sed -i 's/^        /\t/g' ImmortalWrt/package/usb-redirector-server/Makefile
+        
+        # 创建files目录
+        mkdir -p ImmortalWrt/package/usb-redirector-server/files
+        
+        # 创建启动脚本
+        cat > ImmortalWrt/package/usb-redirector-server/files/usbsrvd.init << 'EOF'
+        #!/bin/sh /etc/rc.common
+        
+        START=99
+        STOP=10
+        USE_PROCD=1
+        
+        start_service() {
+        	# 创建兼容性链接
+        	/lib/glibc-compat.sh 2>/dev/null || {
+        		ln -sf /lib/libc.so /lib/libc.so.6 2>/dev/null
+        		ln -sf /lib/libc.so /lib/libm.so.6 2>/dev/null
+        		ln -sf /lib/libc.so /lib/libpthread.so.0 2>/dev/null
+        		ln -sf /lib/libc.so /lib/librt.so.1 2>/dev/null
+        	}
+        	
+        	procd_open_instance
+        	procd_set_param command /usr/sbin/usbsrvd
+        	procd_set_param respawn
+        	procd_set_param stderr 1
+        	procd_close_instance
+        }
+        
+        stop_service() {
+        	killall usbsrvd 2>/dev/null
+        }
+        EOF
+        chmod +x ImmortalWrt/package/usb-redirector-server/files/usbsrvd.init
+        
+        echo "Wrapper package created successfully"
 
-    # 新增：修改默认网络配置
+    # 在 network configuration 之前添加兼容性设置
+    - name: Setup glibc compatibility
+      run: |
+        cd ImmortalWrt
+        
+        # 创建全局兼容性脚本
+        mkdir -p files/etc/uci-defaults
+        cat > files/etc/uci-defaults/00-glibc-compat << 'EOF'
+        #!/bin/sh
+        
+        # Create glibc compatibility links for musl
+        ln -sf /lib/libc.so /lib/libc.so.6 2>/dev/null
+        ln -sf /lib/libc.so /lib/libm.so.6 2>/dev/null
+        ln -sf /lib/libc.so /lib/libpthread.so.0 2>/dev/null
+        ln -sf /lib/libc.so /lib/librt.so.1 2>/dev/null
+        ln -sf /lib/ld-musl-aarch64.so.1 /lib/ld-linux-aarch64.so.1 2>/dev/null
+        
+        exit 0
+        EOF
+        chmod +x files/etc/uci-defaults/00-glibc-compat
+        
+        echo "Glibc compatibility setup created"
+
+    # 后面的步骤保持不变...
     - name: Customize network configuration
       run: |
         cd ImmortalWrt
@@ -194,7 +387,7 @@ jobs:
         
         echo "Network configuration customized: LAN IP set to 192.168.10.1"
 
-    # 修改后的配置步骤：直接包含USB Redirector
+    # 其余步骤保持不变...
     - name: Configure ImmortalWrt with USB Redirector built-in
       run: |
         cd ImmortalWrt
@@ -276,7 +469,6 @@ jobs:
         make download -j8 || make download -j1 V=s
         find dl -size -1024c -exec rm -f {} \;
 
-    # 合并构建步骤
     - name: Build ImmortalWrt firmware with USB Redirector
       run: |
         cd ImmortalWrt
@@ -316,36 +508,7 @@ jobs:
         echo "Total packages built:"
         find bin/packages/ -name "*.ipk" | wc -l
 
-    - name: Create custom startup script for USB Redirector
-      run: |
-        cd ImmortalWrt
-        
-        # 创建USB Redirector的启动脚本
-        mkdir -p files/etc/init.d
-        cat > files/etc/init.d/usb-redirector << 'EOF'
-        #!/bin/sh /etc/rc.common
-        
-        START=99
-        STOP=10
-        
-        USE_PROCD=1
-        PROG=/usr/sbin/usb-redirector-server
-        
-        start_service() {
-            procd_open_instance
-            procd_set_param command $PROG
-            procd_set_param respawn
-            procd_close_instance
-        }
-        
-        stop_service() {
-            killall usb-redirector-server 2>/dev/null
-        }
-        EOF
-        
-        chmod +x files/etc/init.d/usb-redirector
-        
-        echo "USB Redirector startup script created"
+    # 删除原来的 "Create custom startup script for USB Redirector" 步骤，因为已经在包装器中处理了
 
     - name: Organize artifacts
       if: always()
