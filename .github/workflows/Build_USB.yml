@@ -87,15 +87,33 @@ jobs:
         ./scripts/feeds install -a
 
     # 添加这一步：复制USB Redirector包到ImmortalWrt
-    - name: Copy USB Redirector package to ImmortalWrt
+
+    - name: Copy USB Redirector package to ImmortalWrt  
       run: |
         echo "=== Copying USB Redirector Server package ==="
-        
-        # Copy package to ImmortalWrt
-        cp -r usb-redirector-server ImmortalWrt/package/
-        
-        # Fix Makefile tabs
-        sed -i 's/^[ ]\+/\t/g' ImmortalWrt/package/usb-redirector-server/Makefile
+    
+        # 假设您的仓库根目录包含 Makefile
+        echo "Repository contents:"
+        ls -la
+    
+        # 创建包目录
+        mkdir -p ImmortalWrt/package/usb-redirector-server
+    
+        # 复制所有文件（除了 .git 和 ImmortalWrt）
+        rsync -av --exclude='.git' --exclude='ImmortalWrt' --exclude='.github' . ImmortalWrt/package/usb-redirector-server/
+      
+        # 检查复制结果
+        echo "Copied files:"
+        ls -la ImmortalWrt/package/usb-redirector-server/
+    
+        # 修复 Makefile 缩进
+        if [ -f ImmortalWrt/package/usb-redirector-server/Makefile ]; then
+            sed -i 's/^[ ]\+/\t/g' ImmortalWrt/package/usb-redirector-server/Makefile
+            echo "Makefile tabs fixed"
+        else
+            echo "Warning: Makefile not found after copy"
+        fi
+    
         echo "Package copied successfully"
 
     # 新增：修改默认网络配置
