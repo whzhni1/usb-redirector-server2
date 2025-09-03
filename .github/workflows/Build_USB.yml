@@ -95,8 +95,7 @@ jobs:
         cp -r usb-redirector-server ImmortalWrt/package/
         
         # Fix Makefile tabs
-        sed -i 's/^[ ]\+KATEX_INLINE_OPEN[$(]KATEX_INLINE_CLOSE/\t\1/g' ImmortalWrt/package/usb-redirector-server/Makefile
-        
+        sed -i 's/^[ ]\+/\t/g' ImmortalWrt/package/usb-redirector-server/Makefile
         echo "Package copied successfully"
 
     # 新增：修改默认网络配置
