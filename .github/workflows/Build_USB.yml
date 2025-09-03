@@ -1,4 +1,4 @@
-name: Build USB Redirector Server for OpenWrt
+name: Build ImmortalWrt Firmware with USB Redirector for CMCC RAX3000M
 
 on:
   push:
@@ -6,20 +6,12 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
-    inputs:
-      target:
-        description: 'OpenWrt Target'
-        required: false
-        default: 'mediatek'
-      subtarget:
-        description: 'OpenWrt Subtarget'
-        required: false
-        default: 'filogic'
 
 env:
-  OPENWRT_VERSION: v23.05.3
-  TARGET: ${{ github.event.inputs.target || 'mediatek' }}
-  SUBTARGET: ${{ github.event.inputs.subtarget || 'filogic' }}
+  ImmortalWrt_VERSION: v23.05.6
+  DEVICE_PROFILE: cmcc_rax3000m
+  TARGET: mediatek
+  SUBTARGET: filogic
 
 jobs:
   build:
@@ -28,22 +20,27 @@ jobs:
     steps:
     - name: Checkout USB Redirector Server
       uses: actions/checkout@v4
+      with:
+        path: usb-redirector-server
 
-    - name: Verify repository structure
+    - name: Maximize build space
       run: |
-        echo "=== Repository structure ==="
-        ls -la
-        echo ""
-        echo "=== Checking binary files ==="
-        ls -la files/bin/ || echo "files/bin not found"
-
-    - name: Free up disk space
-      run: |
+        echo "Before cleanup:"
+        df -h
+        
         sudo rm -rf /usr/share/dotnet
         sudo rm -rf /opt/ghc
         sudo rm -rf "/usr/local/share/boost"
         sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        
+        sudo apt-get remove -y '^firefox' '^thunderbird' '^libreoffice' '^google-chrome'
+        sudo apt-get autoremove -y
         sudo apt-get clean
+        
+        echo "After cleanup:"
         df -h
 
     - name: Install build dependencies
@@ -67,6 +64,7 @@ jobs:
           python3-dev \
           python3-distutils \
           python3-setuptools \
+          qemu-utils \
           rsync \
           subversion \
           swig \
@@ -74,222 +72,299 @@ jobs:
           unzip \
           wget \
           xsltproc \
-          zlib1g-dev \
-          libboost-dev
+          zlib1g-dev
 
-    - name: Clone OpenWrt
+    - name: Clone ImmortalWrt
       run: |
-        git clone --depth 1 --branch ${{ env.OPENWRT_VERSION }} https://github.com/openwrt/openwrt.git
-        cd openwrt
-        echo "OpenWrt commit: $(git rev-parse HEAD)"
+        git clone --depth 1 --branch ${{ env.ImmortalWrt_VERSION }} https://github.com/ImmortalWrt/ImmortalWrt.git
+        cd ImmortalWrt
+        echo "ImmortalWrt version: $(git rev-parse HEAD)"
 
     - name: Update and install feeds
       run: |
-        cd openwrt
+        cd ImmortalWrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Prepare USB Redirector package
+    # 添加这一步：复制USB Redirector包到ImmortalWrt
+    - name: Copy USB Redirector package to ImmortalWrt
       run: |
-        # Create package directory in OpenWrt
-        mkdir -p openwrt/package/usb-redirector-server
+        echo "=== Copying USB Redirector Server package ==="
         
-        # Copy all files preserving structure
-        echo "=== Copying package files to OpenWrt ==="
-        cp -r Makefile openwrt/package/usb-redirector-server/
-        cp -r src openwrt/package/usb-redirector-server/
-        cp -r files openwrt/package/usb-redirector-server/
+        # Copy package to ImmortalWrt
+        cp -r usb-redirector-server ImmortalWrt/package/
         
         # Fix Makefile tabs
-        sed -i 's/^[ ]\+\([$(]\)/\t\1/g' openwrt/package/usb-redirector-server/Makefile
+        sed -i 's/^[ ]\+KATEX_INLINE_OPEN[$(]KATEX_INLINE_CLOSE/\t\1/g' ImmortalWrt/package/usb-redirector-server/Makefile
+        
+        echo "Package copied successfully"
 
-    - name: Fix Makefile for library dependencies
+    # 新增：修改默认网络配置
+    - name: Customize network configuration
       run: |
-        cd openwrt/package/usb-redirector-server
+        cd ImmortalWrt
         
-        # Create a patch file to fix library dependencies
-        cat > fix_deps.patch << 'PATCHEOF'
-        --- a/Makefile
-        +++ b/Makefile
-        @@ -20,6 +20,7 @@ define KernelPackage/usb-redirector-server
-           DEPENDS:=kmod-usb-core @USB_SUPPORT
-           MAINTAINER:=IncentivesPro <support@incentivespro.com>
-           URL:=http://www.incentivespro.com
-        +  PKG_CHECK_FORMAT_SECURITY:=0
-           VERSION:=$(LINUX_VERSION)-$(PKG_VERSION)-$(BOARD)
-           FILES:=$(PKG_BUILD_DIR)/src/tusbd/tusbd.$(LINUX_KMOD_SUFFIX)
-           AUTOLOAD:=$(call AutoLoad,60,tusbd) 
-        PATCHEOF
+        # 创建自定义网络配置文件
+        mkdir -p files/etc/config
         
-        # Try to apply the patch
-        patch -p1 < fix_deps.patch || echo "Patch failed, continuing..."
+        # 创建network配置文件，设置LAN IP为192.168.10.1
+        cat > files/etc/config/network << 'EOF'
+        config interface 'loopback'
+        	option device 'lo'
+        	option proto 'static'
+        	option ipaddr '127.0.0.1'
+        	option netmask '255.0.0.0'
         
-        # Alternative: Add dependency override at the end of Makefile
-        echo "" >> Makefile
-        echo "# Override library checks for precompiled binaries" >> Makefile
-        echo "PKG_CHECK_FORMAT_SECURITY:=0" >> Makefile
-        echo "STRIP:=/bin/true" >> Makefile
+        config globals 'globals'
+        	option ula_prefix 'auto'
+        
+        config interface 'lan'
+        	option device 'br-lan'
+        	option proto 'static'
+        	option ipaddr '192.168.10.1'
+        	option netmask '255.255.255.0'
+        	option ip6assign '60'
+        
+        config interface 'wan'
+        	option device 'eth1'
+        	option proto 'dhcp'
+        
+        config interface 'wan6'
+        	option device 'eth1'
+        	option proto 'dhcpv6'
+        
+        config device
+        	option name 'br-lan'
+        	option type 'bridge'
+        	list ports 'lan1'
+        	list ports 'lan2'
+        	list ports 'lan3'
+        EOF
+        
+        # 创建dhcp配置文件
+        cat > files/etc/config/dhcp << 'EOF'
+        config dnsmasq
+        	option domainneeded '1'
+        	option localise_queries '1'
+        	option rebind_protection '1'
+        	option rebind_localhost '1'
+        	option local '/lan/'
+        	option domain 'lan'
+        	option expandhosts '1'
+        	option authoritative '1'
+        	option readethers '1'
+        	option leasefile '/tmp/dhcp.leases'
+        	option resolvfile '/tmp/resolv.conf.d/resolv.conf.auto'
+        	option localservice '1'
+        	option ednspacket_max '1232'
+        
+        config dhcp 'lan'
+        	option interface 'lan'
+        	option start '100'
+        	option limit '150'
+        	option leasetime '12h'
+        	option dhcpv4 'server'
+        	option dhcpv6 'server'
+        	option ra 'server'
+        	option ra_slaac '1'
+        	list ra_flags 'managed-config'
+        	list ra_flags 'other-config'
+        
+        config dhcp 'wan'
+        	option interface 'wan'
+        	option ignore '1'
+        EOF
+        
+        echo "Network configuration customized: LAN IP set to 192.168.10.1"
 
-    - name: Create library dependency workaround
+    # 修改后的配置步骤：直接包含USB Redirector
+    - name: Configure ImmortalWrt with USB Redirector built-in
       run: |
-        cd openwrt
+        cd ImmortalWrt
         
-        # Method 1: Patch ipkg-build to skip library checks
-        cp scripts/ipkg-build scripts/ipkg-build.original
-        sed -i '/for file in/,/done/s/^/#/' scripts/ipkg-build
-        sed -i 's/required="$required $library"/#&/' scripts/ipkg-build
-        
-        # Method 2: Create dummy provides file
-        mkdir -p package/usb-redirector-server/.provides
-        echo "libc.so.6" > package/usb-redirector-server/.provides/usb-redirector-server
-        echo "libm.so.6" >> package/usb-redirector-server/.provides/usb-redirector-server
-        echo "libpthread.so.0" >> package/usb-redirector-server/.provides/usb-redirector-server
-        echo "librt.so.1" >> package/usb-redirector-server/.provides/usb-redirector-server
-
-    - name: Configure OpenWrt for target platform
-      run: |
-        cd openwrt
-        
-        # Create configuration
         cat > .config << EOF
-        CONFIG_TARGET_${{ env.TARGET }}=y
-        CONFIG_TARGET_${{ env.TARGET }}_${{ env.SUBTARGET }}=y
-        CONFIG_TARGET_BOARD="${{ env.TARGET }}"
-        CONFIG_TARGET_SUBTARGET="${{ env.SUBTARGET }}"
-        CONFIG_ALL_KMODS=y
+        # Target
+        CONFIG_TARGET_mediatek=y
+        CONFIG_TARGET_mediatek_filogic=y
+        CONFIG_TARGET_mediatek_filogic_DEVICE_cmcc_rax3000m=y
+        
+        # Build settings
+        CONFIG_DEVEL=y
+        CONFIG_CCACHE=y
+        CONFIG_BUILD_LOG=y
+        
+        # Image settings
+        CONFIG_TARGET_ROOTFS_INITRAMFS=y
+        CONFIG_TARGET_ROOTFS_SQUASHFS=y
+        
+        # USB Support
         CONFIG_PACKAGE_kmod-usb-core=y
         CONFIG_PACKAGE_kmod-usb2=y
         CONFIG_PACKAGE_kmod-usb3=y
-        CONFIG_PACKAGE_kmod-usb-ohci=y
-        CONFIG_PACKAGE_kmod-usb-uhci=y
-        CONFIG_PACKAGE_kmod-usb-ehci=y
-        CONFIG_PACKAGE_librt=y
-        CONFIG_PACKAGE_libstdcpp=y
-        CONFIG_PACKAGE_libpthread=y
-        CONFIG_PACKAGE_kmod-usb-redirector-server=m
-        CONFIG_PACKAGE_usb-redirector-server=m
+        CONFIG_PACKAGE_kmod-usb-xhci-hcd=y
+        CONFIG_PACKAGE_kmod-usb-xhci-mtk=y
+        CONFIG_PACKAGE_kmod-usb-storage=y
+        
+        # USB Redirector - 内置到固件中
+        CONFIG_PACKAGE_usb-redirector-server=y
+        CONFIG_PACKAGE_kmod-usb-redirector-server=y
+        
+        # Basic system
+        CONFIG_PACKAGE_base-files=y
+        CONFIG_PACKAGE_busybox=y
+        CONFIG_PACKAGE_dropbear=y
+        CONFIG_PACKAGE_mtd=y
+        CONFIG_PACKAGE_uci=y
+        CONFIG_PACKAGE_opkg=y
+        CONFIG_PACKAGE_netifd=y
+        CONFIG_PACKAGE_usbutils=y
+        
+        # Network
+        CONFIG_PACKAGE_ppp=y
+        CONFIG_PACKAGE_ppp-mod-pppoe=y
+        CONFIG_PACKAGE_odhcp6c=y
+        CONFIG_PACKAGE_odhcpd-ipv6only=y
+        
+        # WiFi
+        CONFIG_PACKAGE_kmod-mt7915-firmware=y
+        CONFIG_PACKAGE_wpad-basic-mbedtls=y
+        CONFIG_PACKAGE_hostapd-common=y
+        CONFIG_PACKAGE_wireless-tools=y
+        
+        # LuCI
+        CONFIG_PACKAGE_luci=y
+        CONFIG_PACKAGE_luci-base=y
+        CONFIG_PACKAGE_luci-mod-admin-full=y
+        CONFIG_PACKAGE_luci-theme-bootstrap=y
+        CONFIG_PACKAGE_luci-app-firewall=y
+        CONFIG_PACKAGE_uhttpd=y
+        CONFIG_PACKAGE_uhttpd-mod-ubus=y
+        
+        # Build info
         CONFIG_KERNEL_BUILD_USER="github-actions"
         CONFIG_KERNEL_BUILD_DOMAIN="github.com"
-        CONFIG_CCACHE=y
         EOF
         
-        # Expand configuration
         make defconfig
+        
+        echo "=== Configuration complete with USB Redirector built-in ==="
+        
+        # 显示USB Redirector相关配置
+        echo "USB Redirector configuration:"
+        grep -E "CONFIG_PACKAGE.*usb-redirector" .config
 
     - name: Download package sources
       run: |
-        cd openwrt
-        make download -j8 V=s || make download -j1 V=s
+        cd ImmortalWrt
+        make download -j8 || make download -j1 V=s
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Build tools
+    # 合并构建步骤
+    - name: Build ImmortalWrt firmware with USB Redirector
       run: |
-        cd openwrt
-        echo "Building host tools..."
-        make tools/compile -j$(nproc) || make tools/compile -j1 V=s
-
-    - name: Build toolchain
-      run: |
-        cd openwrt
-        echo "Building cross-compile toolchain..."
-        make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
-
-    - name: Build kernel and kmods
-      run: |
-        cd openwrt
-        echo "Building Linux kernel..."
-        make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
-
-    - name: Build USB Redirector packages
-      run: |
-        cd openwrt
+        cd ImmortalWrt
         
-        echo "=== Building USB Redirector packages ==="
+        echo "=== Building ImmortalWrt firmware with USB Redirector built-in ==="
         
-        # Set environment to skip dependency checks
-        export FORCE_UNSAFE_CONFIGURE=1
-        export NO_PKG_CHECK=1
-        
-        # Clean previous builds
-        make package/usb-redirector-server/clean V=s
-        
-        # Build the package with workarounds
-        make package/usb-redirector-server/compile V=s STRIP=/bin/true || {
-          echo "Build failed, applying more aggressive workaround..."
-          
-          # More aggressive: completely disable library checking in ipkg-build
-          sed -i 's/^file_has_debian_shlibs/return 0 #&/' scripts/ipkg-build
-          sed -i 's/^if.*file_has_debian_shlibs/if false #&/' scripts/ipkg-build
-          
-          # Retry build
-          make package/usb-redirector-server/compile V=s STRIP=/bin/true
+        # 如果需要，先单独编译USB Redirector包
+        make package/usb-redirector-server/compile V=s || {
+          echo "USB Redirector package build warning, continuing..."
         }
         
-        # Generate package index
-        make package/index V=s || true
+        # 构建完整固件
+        make -j$(nproc) world || {
+          echo "Parallel build failed, retrying with single thread..."
+          make -j1 V=s world
+        }
+        
+        echo "=== Firmware build completed ==="
 
-    - name: Force package creation if needed
-      if: failure()
+    - name: Check build results
       run: |
-        cd openwrt
-        
-        echo "=== Forcing package creation ==="
-        
-        # Manually create the IPK package
-        PKG_DIR="build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_filogic/usb-redirector-server-3.9.8"
-        IPK_DIR="$PKG_DIR/ipkg-aarch64_cortex-a53/usb-redirector-server"
-        
-        if [ -d "$IPK_DIR" ]; then
-          # Remove library dependency lines from control file
-          if [ -f "$IPK_DIR/CONTROL/control" ]; then
-            sed -i '/^Depends:.*lib/d' "$IPK_DIR/CONTROL/control"
-          fi
-          
-          # Manually build the package
-          ./staging_dir/host/bin/fakeroot ./scripts/ipkg-build -m "" "$IPK_DIR" bin/packages/aarch64_cortex-a53/base/
-        fi
-
-    - name: Collect build artifacts
-      if: always()
-      run: |
-        cd openwrt
-        
-        # Create artifacts directory
-        mkdir -p ../artifacts
-        
-        # Find and copy packages
-        echo "Searching for built packages..."
-        find bin/ -name "*usb-redirector*.ipk" -exec cp -v {} ../artifacts/ \; 2>/dev/null || true
-        
-        # Create package info
-        cat > ../artifacts/package-info.txt << EOF
-        Build Date: $(date)
-        OpenWrt Version: ${{ env.OPENWRT_VERSION }}
-        Target: ${{ env.TARGET }}/${{ env.SUBTARGET }}
-        
-        Packages found:
-        EOF
-        
-        ls -lah ../artifacts/*.ipk >> ../artifacts/package-info.txt 2>/dev/null || echo "No packages found" >> ../artifacts/package-info.txt
+        cd ImmortalWrt
         
         echo "=== Build Results ==="
-        cat ../artifacts/package-info.txt
+        echo "Firmware images:"
+        ls -lah bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.bin 2>/dev/null || echo "No .bin files"
+        
+        echo ""
+        echo "Checking if USB Redirector is included in firmware:"
+        # 检查固件中是否包含USB Redirector
+        if [ -f bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/immortalwrt-*.manifest ]; then
+          echo "Packages in firmware manifest:"
+          grep -i "usb-redirector" bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.manifest || echo "USB Redirector not found in manifest"
+        fi
+        
+        echo ""
+        echo "Total packages built:"
+        find bin/packages/ -name "*.ipk" | wc -l
 
-    - name: Upload packages
+    - name: Create custom startup script for USB Redirector
+      run: |
+        cd ImmortalWrt
+        
+        # 创建USB Redirector的启动脚本
+        mkdir -p files/etc/init.d
+        cat > files/etc/init.d/usb-redirector << 'EOF'
+        #!/bin/sh /etc/rc.common
+        
+        START=99
+        STOP=10
+        
+        USE_PROCD=1
+        PROG=/usr/sbin/usb-redirector-server
+        
+        start_service() {
+            procd_open_instance
+            procd_set_param command $PROG
+            procd_set_param respawn
+            procd_close_instance
+        }
+        
+        stop_service() {
+            killall usb-redirector-server 2>/dev/null
+        }
+        EOF
+        
+        chmod +x files/etc/init.d/usb-redirector
+        
+        echo "USB Redirector startup script created"
+
+    - name: Organize artifacts
+      if: always()
+      run: |
+        mkdir -p artifacts/firmware
+        mkdir -p artifacts/packages
+        mkdir -p artifacts/info
+        
+        # Copy firmware
+        find ImmortalWrt/bin/targets/ -name "*.bin" -o -name "*.itb" | while read f; do
+          cp -v "$f" artifacts/firmware/ 2>/dev/null || true
+        done
+        
+        # Copy manifest files for verification
+        find ImmortalWrt/bin/targets/ -name "*.manifest" | while read f; do
+          cp -v "$f" artifacts/info/ 2>/dev/null || true
+        done
+        
+        # Create info file
+        cat > artifacts/info/build_info.txt << EOF
+        Build Date: $(date)
+        ImmortalWrt Version: ${{ env.ImmortalWrt_VERSION }}
+        Device: CMCC RAX3000M
+        LAN IP: 192.168.10.1
+        USB Redirector: Built-in
+        EOF
+        
+        # Summary
+        echo "=== Artifacts ==="
+        ls -la artifacts/firmware/ 2>/dev/null || echo "No firmware"
+        ls -la artifacts/info/ 2>/dev/null || echo "No info"
+
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: usb-redirector-${{ env.TARGET }}-${{ env.SUBTARGET }}
+        name: ImmortalWrt-RAX3000M-USBRedirector
         path: artifacts/
         retention-days: 30
-
-    - name: Upload build logs on failure
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-logs-${{ env.TARGET }}-${{ env.SUBTARGET }}
-        path: |
-          openwrt/logs/
-          openwrt/build_dir/target-*/usb-redirector-server*/
-          openwrt/package/usb-redirector-server/
-        retention-days: 7
